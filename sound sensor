@@ -1,0 +1,35 @@
+#define BLYNK_PRINT Serial
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+
+// Blynk credentials
+char auth[] = "YOUR_BLYNK_AUTH_TOKEN";
+char ssid[] = "YOUR_WIFI_NAME";
+char pass[] = "YOUR_WIFI_PASSWORD";
+
+// Sound sensor
+int soundPin = 14;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(soundPin, INPUT);
+
+  Blynk.begin(auth, ssid, pass);
+}
+
+void loop() {
+  Blynk.run();
+
+  int soundState = digitalRead(soundPin);
+
+  // Send to Blynk
+  Blynk.virtualWrite(V1, soundState);
+
+  if (soundState == HIGH) {
+    Serial.println("🔊 Sound Detected!");
+  } else {
+    Serial.println("Silent");
+  }
+
+  delay(500);
+}
