@@ -1,0 +1,269 @@
+#include <WiFi.h>
+#include <HX711.h>
+#include <HTTPClient.h>
+
+// TOKENS 
+#define UBIDOTS_TOKEN "BBUS-jIRPIUV0F8JQmt7Ow8jqcdY8SQ7B6o"
+#define TELEGRAM_BOT "8643824216:AAF1UjqCSPIAwmiXMnZViy9arAKa2M3I1gQ"
+#define CHAT_ID "5284599852"
+
+// PINS
+#define LOAD_DT         4
+#define LOAD_SCK        5
+#define VIBRATION_PIN   6
+#define TRIG_PIN        8
+#define ECHO_PIN        9
+#define DOOR_PIN        10
+#define WINDOW_PIN      11
+#define SOUND_DO        12
+#define SOUND_AO        1
+#define PIR_PIN         13
+#define BUZZER_PIN      14
+
+// THRESHOLDS 
+#define LOAD_THRESHOLD      20.0
+#define ULTRA_THRESHOLD     50.0
+#define SOUND_AO_THRESHOLD  2000
+#define VIBRATION_THRESHOLD 1
+
+#define PRIMARY_MIN         1
+#define SECONDARY_MIN       2
+#define TIME_WINDOW         5000
+
+HX711 scale;
+float calFactor = 0.02;
+
+char ssid[32] = "";
+char pass[64] = "";
+
+bool alarmArmed = true;
+bool intrusionDetected = false;
+unsigned long firstTrigger = 0;
+int alertLevel = 0; // 0=Normal, 1=Monitoring, 2=Warning, 3=Alarm
+
+void getSerialInput(const char* prompt, char* buffer, int len) {
+    Serial.print(prompt);
+    int i = 0;
+    while (i < len - 1) {
+        if (Serial.available()) {
+            char c = Serial.read();
+            if (c == '\n') break;
+            buffer[i++] = c;
+        }
+    }
+    buffer[i] = '\0';
+    Serial.println(buffer);
+}
+
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) { ; }
+    delay(1000);
+    
+    Serial.println("\n===");
+    Serial.println("IDS SYSTEM - SERIAL CONFIGURATION");
+    Serial.println("===\n");
+    
+    getSerialInput("Enter WiFi Name: ", ssid, 32);
+    getSerialInput("Enter WiFi Password: ", pass, 64);
+    
+    Serial.println("\n Configuring Hardware");
+    
+    pinMode(VIBRATION_PIN, INPUT);
+    pinMode(DOOR_PIN, INPUT_PULLUP);
+    pinMode(WINDOW_PIN, INPUT_PULLUP);
+    pinMode(SOUND_DO, INPUT);
+    pinMode(PIR_PIN, INPUT);
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    
+    scale.begin(LOAD_DT, LOAD_SCK);
+    scale.set_gain(128);
+    scale.tare(20);
+    scale.set_scale(calFactor);
+    Serial.println("Load sensor ready");
+    
+    Serial.println("\n--- Connecting to WiFi ---");
+    WiFi.begin(ssid, pass);
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi CONNECTED");
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println("\nWiFi FAILED");
+        while (1) delay(1000);
+    }
+    Serial.println("   IDS SYSTEM READY");
+}
+
+float getLoadWeight() {
+    if (!scale.is_ready()) return 0;
+    float weight = scale.get_units(10);
+    if (weight < 0.0f) weight = 0.0f;
+    if (weight > 20) {
+        Serial.print("[LOAD] EXCEEDS MAX: ");
+        Serial.println(weight);
+        return 0;
+    }
+    return weight;
+}
+
+float getUltrasonic() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    if (duration == 0) return 999;
+    return duration * 0.034 / 2;
+}
+
+void sendToUbidots(bool door, bool window, float load, bool pir, bool vibration, int sound, float ultrasonic, int primary, int secondary, int alert) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    
+    HTTPClient http;
+    String url = "http://industrial.api.ubidots.com/api/v1.6/devices/ids-esp32";
+    http.begin(url);
+    http.addHeader("X-Auth-Token", UBIDOTS_TOKEN);
+    http.addHeader("Content-Type", "application/json");
+    
+    String payload = "{";
+    payload += "\"door\":" + String(door ? 1 : 0) + ",";
+    payload += "\"window\":" + String(window ? 1 : 0) + ",";
+    payload += "\"load\":" + String(load, 2) + ",";
+    payload += "\"pir\":" + String(pir ? 1 : 0) + ",";
+    payload += "\"vibration\":" + String(vibration ? 1 : 0) + ",";
+    payload += "\"sound\":" + String(sound) + ",";
+    payload += "\"ultrasonic\":" + String(ultrasonic, 1) + ",";
+    payload += "\"primary\":" + String(primary) + ",";
+    payload += "\"secondary\":" + String(secondary) + ",";
+    payload += "\"alert_level\":" + String(alert);
+    payload += "}";
+    
+    int code = http.POST(payload);
+    Serial.print("[UBIDOTS] ");
+    Serial.println(code == 200 ? "OK" : "FAIL " + String(code));
+    http.end();
+}
+
+void sendTelegramAlert(String message) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    
+    HTTPClient http;
+    String url = "https://api.telegram.org/bot" + String(TELEGRAM_BOT) + "/sendMessage";
+    url += "?chat_id=" + String(CHAT_ID) + "&text=" + message;
+    http.begin(url);
+    int code = http.GET();
+    Serial.print("[TELEGRAM] ");
+    Serial.println(code == 200 ? "OK" : "FAIL " + String(code));
+    http.end();
+}
+
+void scanSensors() {
+    Serial.println("\n SCANNING ");
+    
+    // READ ALL SENSORS (ALWAYS) 
+    bool door = !digitalRead(DOOR_PIN);
+    bool window = !digitalRead(WINDOW_PIN);
+    float load = getLoadWeight();
+    bool loadTrigger = load > LOAD_THRESHOLD;
+    
+    bool pir = digitalRead(PIR_PIN);
+    bool vibration = digitalRead(VIBRATION_PIN) == VIBRATION_THRESHOLD;
+    int soundValue = analogRead(SOUND_AO);
+    bool soundTrigger = soundValue > SOUND_AO_THRESHOLD;
+    
+    float distance = getUltrasonic();
+    bool ultraTrigger = distance < ULTRA_THRESHOLD;
+    
+    //DISPLAY ALL VALUES 
+    Serial.println("1. Door:      " + String(door ? "OPEN" : "CLOSED"));
+    Serial.println("2. Window:    " + String(window ? "OPEN" : "CLOSED"));
+    Serial.println("3. Load:      " + String(load, 2) + " kg");
+    Serial.println("4. PIR:       " + String(pir ? "MOTION" : "CLEAR"));
+    Serial.println("5. Vibration: " + String(vibration ? "DETECTED" : "NONE"));
+    Serial.println("6. Sound:     " + String(soundValue));
+    Serial.println("7. Ultrasonic:" + String(distance, 1) + " cm");
+
+    // COUNTS 
+    int primary = door + window + loadTrigger;
+    int secondary = pir + vibration + soundTrigger + ultraTrigger;
+    
+    Serial.print("Primary: "); Serial.println(primary);
+    Serial.print("Secondary: "); Serial.println(secondary);
+    
+    //  ALWAYS SEND TO UBIDOTS 
+    sendToUbidots(door, window, load, pir, vibration, soundValue, distance, primary, secondary, alertLevel);
+    
+    // GRADUATED RESPONSE 
+    if (primary >= 1 && secondary >= 2) {
+    
+    // ALARM LEVEL 3 
+    alertLevel = 3;
+    Serial.println("\n ALARM LEVEL 3 - INTRUSION ");
+    intrusionDetected = true;
+    
+    sendToUbidots(door, window, load, pir, vibration, soundValue, distance, primary, secondary, alertLevel);
+    
+    triggerAlarm(door, window, loadTrigger, pir, vibration, soundTrigger, ultraTrigger);
+    
+} else if (primary >= 1 && secondary >= 1) {
+        // WARNING LEVEL 2 
+        alertLevel = 2;
+        Serial.println("\n WARNING LEVEL 2 - SUSPICIOUS ");
+        sendTelegramAlert("WARNING: Suspicious activity detected");
+        sendToUbidots(door, window, load, pir, vibration, soundValue, distance, primary, secondary, alertLevel);
+        
+    } else if (primary > 0 || secondary > 0) {
+        //MONITORING LEVEL 1 
+        alertLevel = 1;
+        Serial.println("\n MONITORING LEVEL 1 - SENSOR ACTIVE ");
+        sendToUbidots(door, window, load, pir, vibration, soundValue, distance, primary, secondary, alertLevel);
+        
+    } else {
+        //NORMAL LEVEL 0 
+        alertLevel = 0;
+        Serial.println("\n[STATUS] NORMAL");
+    }
+}
+
+void triggerAlarm(bool d, bool w, bool l, bool p, bool v, bool s, bool u) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    
+    String reason = "INTRUSION DETECTED:\n";
+    if (d) reason += "Door ";
+    if (w) reason += "Window ";
+    if (l) reason += "Load ";
+    reason += "\n+ ";
+    if (p) reason += "PIR ";
+    if (v) reason += "Vib ";
+    if (s) reason += "Sound ";
+    if (u) reason += "Ultra ";
+    
+    Serial.println(reason);
+    
+    sendTelegramAlert(reason);
+}
+
+void loop() {
+    if (alarmArmed && !intrusionDetected) {
+        scanSensors();
+        delay(2000);
+    } else if (intrusionDetected) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        Serial.println("[ALARM] BUZZER ACTIVE");
+        delay(1000);
+    } else {
+        Serial.println("[SYSTEM] DISARMED");
+        delay(2000);
+    }
+}
