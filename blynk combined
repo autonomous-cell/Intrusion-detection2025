@@ -1,0 +1,181 @@
+#define BLYNK_TEMPLATE_ID "TMPL2-DZU3E9M"
+#define BLYNK_TEMPLATE_NAME "SECURITY SENSORS"
+#define BLYNK_AUTH_TOKEN "ZtxLnYdFBcdIOZbnjBxbR5PrFvEkVZO-"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <HX711.h>
+
+// ---------------- WIFI ----------------
+char ssid[] = "Japhari";
+char pass[] = "Jeff1999";
+
+// ----------------- PIN DEFINITIONS -----------------
+#define DOOR_PIN       10
+#define WINDOW_PIN     11
+#define PIR_PIN        13
+
+#define TRIG_PIN       8
+#define ECHO_PIN       9
+
+#define HX_DT          4
+#define HX_SCK         5
+
+#define SOUND_DO       12
+#define SOUND_AO       1
+
+#define BUZZER_PIN     14
+
+#define VIBRATION_PIN  7
+
+// ----------------- HX711 -----------------
+HX711 scale;
+
+// Adjust after calibration
+float calibration_factor = 0.02;
+
+// ----------------- TIMER -----------------
+BlynkTimer timer;
+
+// ----------------- SETUP -----------------
+void setup() {
+
+  Serial.begin(115200);
+
+  // Blynk connection
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  // Inputs
+  pinMode(DOOR_PIN, INPUT_PULLUP);
+  pinMode(WINDOW_PIN, INPUT_PULLUP);
+  pinMode(PIR_PIN, INPUT);
+
+  pinMode(VIBRATION_PIN, INPUT);
+
+  pinMode(SOUND_DO, INPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  // Ultrasonic
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // HX711
+  scale.begin(HX_DT, HX_SCK);
+
+  scale.set_scale(calibration_factor);
+
+  scale.tare();
+
+  Serial.println("System Started...");
+
+  // Send sensor data every 1 second
+  timer.setInterval(1000L, sendSensorData);
+}
+
+// ----------------- ULTRASONIC FUNCTION -----------------
+float readDistanceCM() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH);
+
+  float distance = duration * 0.034 / 2;
+
+  return distance;
+}
+
+// ----------------- SENSOR FUNCTION -----------------
+void sendSensorData() {
+
+  // -------- Door Sensor --------
+  bool doorOpen = digitalRead(DOOR_PIN) == LOW;
+
+  Serial.print("Door: ");
+  Serial.println(doorOpen ? "OPEN" : "CLOSED");
+
+  Blynk.virtualWrite(V0, doorOpen);
+
+  // -------- Window Sensor --------
+  bool windowOpen = digitalRead(WINDOW_PIN) == LOW;
+
+  Serial.print("Window: ");
+  Serial.println(windowOpen ? "OPEN" : "CLOSED");
+
+  Blynk.virtualWrite(V1, windowOpen);
+
+  // -------- PIR Sensor --------
+  bool motion = digitalRead(PIR_PIN);
+
+  Serial.print("Motion: ");
+  Serial.println(motion ? "DETECTED" : "NO MOTION");
+
+  Blynk.virtualWrite(V2, motion);
+
+  // -------- Vibration Sensor --------
+  bool vibration = digitalRead(VIBRATION_PIN);
+
+  Serial.print("Vibration: ");
+  Serial.println(vibration ? "DETECTED" : "NO VIBRATION");
+
+  Blynk.virtualWrite(V3, vibration);
+
+  // -------- Sound Sensor --------
+  bool soundDetected = digitalRead(SOUND_DO);
+
+  int soundAnalog = analogRead(SOUND_AO);
+
+  Serial.print("Sound Digital: ");
+  Serial.println(soundDetected ? "SOUND DETECTED" : "QUIET");
+
+  Serial.print("Sound Analog: ");
+  Serial.println(soundAnalog);
+
+  Blynk.virtualWrite(V4, soundDetected);
+  Blynk.virtualWrite(V5, soundAnalog);
+
+  // -------- Ultrasonic Sensor --------
+  float distance = readDistanceCM();
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+
+  Blynk.virtualWrite(V6, distance);
+
+  // -------- Load Cell --------
+  float weight = scale.get_units(10);
+
+  Serial.print("Weight: ");
+  Serial.print(weight);
+  Serial.println(" g");
+
+  Blynk.virtualWrite(V7, weight);
+
+  // -------- Alarm Logic --------
+  if (doorOpen || windowOpen || motion || vibration || soundDetected) {
+
+    digitalWrite(BUZZER_PIN, HIGH);
+
+    Blynk.logEvent("intruder_alert", "Intrusion Detected!");
+  } else {
+
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  Serial.println("-------------------------");
+}
+
+// ----------------- LOOP -----------------
+void loop() {
+
+  Blynk.run();
+
+  timer.run();
+}
